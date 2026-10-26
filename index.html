@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<meta name="apple-mobile-web-app-title" content="Swish">
+<meta name="theme-color" content="#080a0d">
+<title>Swish Tracker — Camera AI</title>
+<style>
+:root{--bg:#080a0d;--panel:#12161b;--line:#252b33;--muted:#8e97a3;--green:#35e58b;--yellow:#f7cf45;--red:#ff5d67}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:#fff;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.app{max-width:760px;margin:auto;padding:16px 14px 40px}.top{display:flex;justify-content:space-between;align-items:center}.brand{font-weight:850;font-size:24px}.sub{color:var(--muted);font-size:12px;margin-top:2px}
+button{font:inherit;border:0;color:#fff;border-radius:13px;padding:11px 13px;font-weight:700;background:#1a2027}.primary{background:var(--green);color:#06120b}.danger{background:#8d252c}.yellow{background:#9b7a13}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:12px;margin-top:12px}
+.videoBox{position:relative;background:#000;border-radius:14px;overflow:hidden;aspect-ratio:16/10}.videoBox video{width:100%;height:100%;object-fit:cover;display:block;transform:scaleX(1)}
+#overlay{position:absolute;inset:0;width:100%;height:100%;pointer-events:auto}.badge{position:absolute;top:10px;left:10px;background:#000b;padding:8px 10px;border-radius:10px;font-size:12px}.badge span{color:var(--green)}
+.controls{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:10px}.wide{grid-column:1/-1}.row{display:flex;gap:8px;flex-wrap:wrap}.hint{font-size:12px;color:var(--muted);line-height:1.45;margin-top:9px}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}.stat{background:#171c22;border-radius:12px;padding:10px;text-align:center}.n{font-size:22px;font-weight:850}.l{font-size:10px;color:var(--muted);margin-top:2px}
+.tagbar{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.tag{padding:15px 8px}.make{background:#167844}.swish{background:#947411}.miss{background:#922a32}
+.log{max-height:250px;overflow:auto}.shot{display:flex;justify-content:space-between;align-items:center;padding:10px 3px;border-bottom:1px solid var(--line);font-size:13px}.shot:last-child{border-bottom:0}.pill{padding:5px 8px;border-radius:8px;font-size:11px}.pm{background:#123d28}.ps{background:#4d3b08}.px{background:#4b171b}
+.calibrate{display:none}.calibrate.show{display:block}.calibText{font-size:12px;color:var(--muted);margin-bottom:8px}
+#modelStatus{font-size:12px;color:var(--muted);margin-top:8px}.ok{color:var(--green)!important}.warn{color:var(--yellow)!important}
+@media(max-width:430px){.stats{grid-template-columns:repeat(2,1fr)}.brand{font-size:21px}}
+</style>
+</head>
+<body>
+<div class="app">
+ <div class="top">
+  <div><div class="brand">🏀 SWISH TRACKER</div><div class="sub">Camera-assisted + AI shot detection</div></div>
+  <button onclick="resetSession()">Reset</button>
+ </div>
+
+ <div class="panel">
+  <div class="videoBox">
+   <video id="video" autoplay playsinline muted></video>
+   <canvas id="overlay"></canvas>
+   <div class="badge" id="status">Camera: <span>OFF</span></div>
+  </div>
+  <div class="controls">
+   <button class="primary wide" id="cameraBtn" onclick="toggleCamera()">📷 Start Camera</button>
+   <button id="recordBtn" onclick="toggleRecording()" disabled>● Start Session</button>
+   <button id="calBtn" onclick="calibrate()" disabled>🎯 Set Hoop</button>
+  </div>
+  <div class="calibrate" id="calibration">
+   <div class="calibText">Tap the centre of the hoop on the camera preview. This is used by automatic shot detection.</div>
+  </div>
+  <div id="modelStatus">AI model: not loaded</div>
+  <div class="hint">For best automatic results, place your phone where the hoop and shooting area stay visible. Manual tagging always remains available.</div>
+ </div>
+
+ <div class="panel">
+  <div class="stats">
+   <div class="stat"><div class="n" id="attempts">0</div><div class="l">SHOTS</div></div>
+   <div class="stat"><div class="n" id="makes">0</div><div class="l">MAKES</div></div>
+   <div class="stat"><div class="n" id="swishes">0</div><div class="l">SWISHES</div></div>
+   <div class="stat"><div class="n" id="fg">0%</div><div class="l">FG%</div></div>
+  </div>
+ </div>
+
+ <div class="panel">
+  <div style="font-weight:800;margin-bottom:9px">Manual / AI confirmation</div>
+  <div class="tagbar">
+   <button class="tag make" onclick="tag('make')">✓ MAKE</button>
+   <button class="tag swish" onclick="tag('swish')">★ SWISH</button>
+   <button class="tag miss" onclick="tag('miss')">✕ MISS</button>
+  </div>
+  <div class="hint">A swish is counted as a made shot. AI suggestions appear in the log and can be corrected with the buttons above.</div>
+ </div>
+
+ <div class="panel">
+  <div style="font-weight:800;margin-bottom:8px">Session shots</div>
+  <div class="log" id="log"><div class="hint">No shots yet.</div></div>
+ </div>
+</div>
+
+<script>
+const video=document.getElementById('video'), overlay=document.getElementById('overlay'), ctx=overlay.getContext('2d');
+let stream=null, recording=false, shots=JSON.parse(localStorage.getItem('swishCameraShots')||'[]');
+let hoop=null, model=null, aiTimer=null, lastBall=null, trajectory=[], lastSuggestion=0, sessionStart=null;
+
+function save(){localStorage.setItem('swishCameraShots',JSON.stringify(shots));render()}
+function fmtTime(t){return new Date(t).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'})}
+function tag(type, source='Manual'){
+ if(!recording && source==='Manual'){alert('Start a session first.');return}
+ shots.push({type,source,time:Date.now(),x:hoop?.x||50,y:hoop?.y||50});
+ save();
+}
+function render(){
+ const a=shots.length,m=shots.filter(x=>x.type!=='miss').length,s=shots.filter(x=>x.type==='swish').length;
+ document.getElementById('attempts').textContent=a;
+ document.getElementById('makes').textContent=m;
+ document.getElementById('swishes').textContent=s;
+ document.getElementById('fg').textContent=a?Math.round(m/a*100)+'%':'0%';
+ const log=document.getElementById('log');
+ log.innerHTML=shots.length?shots.slice().reverse().map((x,i)=>{
+  const c=x.type==='make'?'pm':x.type==='swish'?'ps':'px', label=x.type==='make'?'MAKE':x.type==='swish'?'SWISH':'MISS';
+  return `<div class="shot"><span><b>${label}</b> <small style="color:#89929d">${x.source}</small></span><span><span class="pill ${c}">${fmtTime(x.time)}</span></span></div>`;
+ }).join(''):'<div class="hint">No shots yet.</div>';
+}
+async function toggleCamera(){
+ if(stream){stopCamera();return}
+ if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){alert('Camera needs a secure origin. Open via http://localhost on this computer, or run `python3 serve.py --https` and use the https:// address on your phone.');return}
+ try{
+  stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}},audio:false});
+  video.srcObject=stream;
+  document.getElementById('cameraBtn').textContent='⏹ Stop Camera';
+  document.getElementById('recordBtn').disabled=false;document.getElementById('calBtn').disabled=false;
+  document.getElementById('status').innerHTML='Camera: <span>ON</span>';
+  await new Promise(r=>video.onloadedmetadata=r);
+  resizeCanvas(); loadAI();
+ }catch(e){alert('Camera access failed. On iPhone, allow camera access for your browser and open this page over HTTPS or from a trusted local preview.')}
+}
+function stopCamera(){
+ if(aiTimer)cancelAnimationFrame(aiTimer);
+ stream?.getTracks().forEach(t=>t.stop());stream=null;video.srcObject=null;
+ document.getElementById('cameraBtn').textContent='📷 Start Camera';
+ document.getElementById('recordBtn').disabled=true;document.getElementById('calBtn').disabled=true;
+ document.getElementById('status').innerHTML='Camera: <span>OFF</span>';
+}
+function resizeCanvas(){overlay.width=video.videoWidth||1280;overlay.height=video.videoHeight||720}
+window.addEventListener('resize',resizeCanvas);
+async function toggleRecording(){
+ if(!recording){recording=true;sessionStart=Date.now();document.getElementById('recordBtn').textContent='■ End Session';document.getElementById('recordBtn').classList.add('danger');}
+ else{recording=false;document.getElementById('recordBtn').textContent='● Start Session';document.getElementById('recordBtn').classList.remove('danger');}
+}
+function calibrate(){
+ document.getElementById('calibration').classList.add('show');
+ const old=overlay.style.pointerEvents;overlay.style.pointerEvents='auto';
+ const once=(e)=>{
+  const r=overlay.getBoundingClientRect(),x=(e.clientX-r.left)/r.width,y=(e.clientY-r.top)/r.height;
+  hoop={x:x*100,y:y*100};drawOverlay();overlay.removeEventListener('click',once);overlay.style.pointerEvents=old;
+  document.getElementById('calibration').classList.remove('show');
+ };
+ overlay.addEventListener('click',once);
+}
+function drawOverlay(){
+ ctx.clearRect(0,0,overlay.width,overlay.height);
+ if(hoop){
+  ctx.strokeStyle='#35e58b';ctx.lineWidth=4;ctx.beginPath();ctx.arc(hoop.x/100*overlay.width,hoop.y/100*overlay.height,22,0,Math.PI*2);ctx.stroke();
+  ctx.fillStyle='#35e58b';ctx.font='bold 18px sans-serif';ctx.fillText('HOOP',hoop.x/100*overlay.width+28,hoop.y/100*overlay.height+6);
+ }
+ if(lastBall){
+  ctx.fillStyle='#f7cf45';ctx.beginPath();ctx.arc(lastBall.x,lastBall.y,9,0,Math.PI*2);ctx.fill();
+ }
+}
+async function loadAI(){
+ const s=document.getElementById('modelStatus');
+ s.textContent='AI model: loading…';
+ try{
+  if(!window.tf){
+   await loadScript('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js');
+  }
+  await loadScript('https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js');
+  model=await cocoSsd.load();
+  s.textContent='AI model: basketball detection ready';s.className='ok';
+  detectLoop();
+ }catch(e){
+  s.textContent='AI model: unavailable — manual camera mode still works';s.className='warn';
+ }
+}
+function loadScript(src){return new Promise((res,rej)=>{const s=document.createElement('script');s.src=src;s.onload=res;s.onerror=rej;document.head.appendChild(s)})}
+async function detectLoop(){
+ if(!stream||!model)return;
+ try{
+  const preds=await model.detect(video,8);
+  const balls=preds.filter(p=>p.class==='sports ball'&&p.score>.38);
+  if(balls.length){
+   const b=balls.sort((a,b)=>b.score-a.score)[0],x=b.bbox[0]+b.bbox[2]/2,y=b.bbox[1]+b.bbox[3]/2;
+   const now=performance.now(); lastBall={x,y};
+   trajectory.push({x,y,t:now});trajectory=trajectory.filter(p=>now-p.t<1800);
+   analyseTrajectory();
+  }
+  drawOverlay();
+ }catch(e){}
+ aiTimer=requestAnimationFrame(detectLoop);
+}
+function analyseTrajectory(){
+ if(!recording||!hoop||trajectory.length<5||Date.now()-lastSuggestion<3500)return;
+ const n=trajectory.length,last=trajectory[n-1],prev=trajectory[n-4];
+ const hx=hoop.x/100*overlay.width,hy=hoop.y/100*overlay.height;
+ const dist=Math.hypot(last.x-hx,last.y-hy);
+ const near=dist<Math.max(70,overlay.width*.10);
+ const dy=last.y-prev.y;
+ const crossed=trajectory.some((p,i)=>i&&trajectory[i-1].y<hy&&p.y>=hy);
+ if(near||crossed){
+  lastSuggestion=Date.now();
+  const likelyMake=near||crossed;
+  // This is deliberately a suggestion, not a false claim of perfect AI.
+  if(likelyMake){
+   const swish=trajectory.filter(p=>Math.hypot(p.x-hx,p.y-hy)<45).length>=2;
+   shots.push({type:swish?'swish':'make',source:'AI suggestion',time:Date.now(),x:hoop.x,y:hoop.y,confidence:swish?.62:.55});
+   save();
+  }
+  trajectory=[];
+ }
+}
+function resetSession(){if(confirm('Delete all saved shots?')){shots=[];localStorage.removeItem('swishCameraShots');render()}}
+render();
+if('serviceWorker' in navigator)window.addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
+</script>
+</body>
+</html>
